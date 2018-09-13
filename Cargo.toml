@@ -1,5 +1,6 @@
 [package]
 name = "environmental"
+description = "Set scope-limited values can can be accessed statically"
 version = "1.0.0"
 authors = ["Parity Technologies <admin@parity.io>"]
 license = "Apache-2.0"
