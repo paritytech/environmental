@@ -170,7 +170,7 @@ macro_rules! environmental {
 		#[allow(non_camel_case_types)]
 		struct $name { __private_field: () }
 
-		thread_local_impl!(static GLOBAL: ::std::cell::RefCell<Option<*mut $t>>
+		$crate::thread_local_impl!(static GLOBAL: ::std::cell::RefCell<Option<*mut $t>>
 			= ::std::cell::RefCell::new(None));
 
 		impl $name {
@@ -194,7 +194,7 @@ macro_rules! environmental {
 		#[allow(non_camel_case_types, dead_code)]
 		struct $name { __private_field: () }
 
-		thread_local_impl!(static GLOBAL: $crate::imp::RefCell<Option<*mut ($t<$($args),*> + 'static)>>
+		$crate::thread_local_impl!(static GLOBAL: $crate::imp::RefCell<Option<*mut ($t<$($args),*> + 'static)>>
 			= $crate::imp::RefCell::new(None));
 
 		impl $name {
@@ -221,7 +221,7 @@ macro_rules! environmental {
 		#[allow(non_camel_case_types, dead_code)]
 		struct $name <H: $traittype> { _private_field: $crate::imp::PhantomData<H> }
 
-		thread_local_impl!(static GLOBAL: $crate::imp::RefCell<Option<*mut ($t<$concretetype> + 'static)>>
+		$crate::thread_local_impl!(static GLOBAL: $crate::imp::RefCell<Option<*mut ($t<$concretetype> + 'static)>>
 			= $crate::imp::RefCell::new(None));
 
 		impl<H: $traittype> $name<H> {
