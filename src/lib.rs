@@ -1,4 +1,4 @@
-// Copyright 2017, 2018 Parity Technologies
+// Copyright 2017-2019 Parity Technologies
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -243,9 +243,11 @@ macro_rules! environmental {
 			}
 		}
 	};
-	($name:ident : trait $t:ident <>) => { environmental! { $name : trait @$t [] } };
-	($name:ident : trait $t:ident < $($args:ty),* $(,)* >) => { environmental! { $name : trait @$t [$($args,)*] } };
-	($name:ident : trait $t:ident) => { environmental! { $name : trait @$t [] } };
+	($name:ident : trait $t:ident <>) => { $crate::environmental! { $name : trait @$t [] } };
+	($name:ident : trait $t:ident < $($args:ty),* $(,)* >) => {
+		$crate::environmental! { $name : trait @$t [$($args,)*] }
+	};
+	($name:ident : trait $t:ident) => { $crate::environmental! { $name : trait @$t [] } };
 }
 
 #[cfg(test)]
