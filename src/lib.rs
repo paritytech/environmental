@@ -1,4 +1,4 @@
-// Copyright 2017-2019 Parity Technologies
+// Copyright 2017-2020 Parity Technologies
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// tag::description[]
 //! Safe global references to stack variables.
 //!
 //! Set up a global reference with environmental! macro giving it a name and type.
@@ -38,22 +37,64 @@
 //!   stuff();	// safe! doesn't do anything.
 //! }
 //! ```
-// end::description[]
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(not(feature = "std"), feature(const_fn))]
 
-#[cfg(feature = "std")]
-include!("../with_std.rs");
+extern crate alloc;
+
+#[doc(hidden)]
+pub use core::{cell::RefCell, mem::{transmute, replace}, marker::PhantomData};
+
+#[doc(hidden)]
+pub use alloc::{rc::Rc, vec::Vec};
 
 #[cfg(not(feature = "std"))]
-include!("../without_std.rs");
+mod local_key;
+
+#[doc(hidden)]
+#[cfg(not(feature = "std"))]
+pub use local_key::LocalKey;
+
+#[doc(hidden)]
+#[cfg(feature = "std")]
+pub use std::thread::LocalKey;
+
+#[doc(hidden)]
+#[cfg(feature = "std")]
+#[macro_export]
+macro_rules! thread_local_impl {
+	($(#[$attr:meta])* static $name:ident: $t:ty = $init:expr) => (
+		thread_local!($(#[$attr])* static $name: $t = $init);
+	);
+}
+
+#[doc(hidden)]
+#[cfg(not(feature = "std"))]
+#[macro_export]
+macro_rules! thread_local_impl {
+	($(#[$attr:meta])* static $name:ident: $t:ty = $init:expr) => (
+		$(#[$attr])*
+		static $name: $crate::LocalKey<$t> = {
+			fn __init() -> $t { $init }
+
+			$crate::LocalKey::new(__init)
+		};
+	);
+}
+
+/// The global inner that stores the stack of globals.
+#[doc(hidden)]
+pub type GlobalInner<T> = RefCell<Vec<Rc<RefCell<*mut T>>>>;
+
+/// The global type.
+type Global<T> = LocalKey<GlobalInner<T>>;
 
 #[doc(hidden)]
 pub fn using<T: ?Sized, R, F: FnOnce() -> R>(
-	global: &'static imp::LocalKey<imp::RefCell<Option<*mut T>>>,
+	global: &'static Global<T>,
 	protected: &mut T,
-	f: F
+	f: F,
 ) -> R {
 	// store the `protected` reference as a pointer so we can provide it to logic running within
 	// `f`.
@@ -63,27 +104,23 @@ pub fn using<T: ?Sized, R, F: FnOnce() -> R>(
 	// - that we do not use the original mutating reference while the pointer.
 	// exists.
 	global.with(|r| {
-		let original = {
-			let mut global = r.borrow_mut();
-			imp::replace(&mut *global, Some(protected as _))
-		};
+		// Push the new global to the end of the stack.
+		r.borrow_mut().push(
+			Rc::new(RefCell::new(protected as _)),
+		);
 
-		// even if `f` panics the original will be replaced.
-		struct ReplaceOriginal<'a, T: 'a + ?Sized> {
-			original: Option<*mut T>,
-			global: &'a imp::RefCell<Option<*mut T>>,
+		// Even if `f` panics the added global will be popped.
+		struct PopGlobal<'a, T: 'a + ?Sized> {
+			global_stack: &'a GlobalInner<T>,
 		}
 
-		impl<'a, T: 'a + ?Sized> Drop for ReplaceOriginal<'a, T> {
+		impl<'a, T: 'a + ?Sized> Drop for PopGlobal<'a, T> {
 			fn drop(&mut self) {
-				*self.global.borrow_mut() = self.original.take();
+				self.global_stack.borrow_mut().pop();
 			}
 		}
 
-		let _guard = ReplaceOriginal {
-			original,
-			global: r,
-		};
+		let _guard = PopGlobal { global_stack: r };
 
 		f()
 	})
@@ -91,16 +128,18 @@ pub fn using<T: ?Sized, R, F: FnOnce() -> R>(
 
 #[doc(hidden)]
 pub fn with<T: ?Sized, R, F: FnOnce(&mut T) -> R>(
-	global: &'static imp::LocalKey<imp::RefCell<Option<*mut T>>>,
+	global: &'static Global<T>,
 	mutator: F,
 ) -> Option<R> {
-	global.with(|r| unsafe {
-		let ptr = r.borrow_mut();
-		match *ptr {
-			Some(ptr) => {
+	global.with(|r| {
+		// We always use the `last` element when we want to access the
+		// currently set global.
+		let last = r.borrow().last().cloned();
+		match last {
+			Some(ptr) => unsafe {
 				// safe because it's only non-zero when it's being called from using, which
 				// is holding on to the underlying reference (and not using it itself) safely.
-				Some(mutator(&mut *ptr))
+				Some(mutator(&mut **ptr.borrow_mut()))
 			}
 			None => None,
 		}
@@ -170,8 +209,9 @@ macro_rules! environmental {
 		#[allow(non_camel_case_types)]
 		struct $name { __private_field: () }
 
-		$crate::thread_local_impl!(static GLOBAL: ::std::cell::RefCell<Option<*mut $t>>
-			= ::std::cell::RefCell::new(None));
+		$crate::thread_local_impl! {
+			static GLOBAL: $crate::GlobalInner<$t> = Default::default()
+		}
 
 		impl $name {
 			#[allow(unused_imports)]
@@ -194,23 +234,25 @@ macro_rules! environmental {
 		#[allow(non_camel_case_types, dead_code)]
 		struct $name { __private_field: () }
 
-		$crate::thread_local_impl!(static GLOBAL: $crate::imp::RefCell<Option<*mut ($t<$($args),*> + 'static)>>
-			= $crate::imp::RefCell::new(None));
+		$crate::thread_local_impl! {
+			static GLOBAL: $crate::GlobalInner<(dyn $t<$($args),*> + 'static)>
+				= Default::default()
+		};
 
 		impl $name {
 		#[allow(unused_imports)]
 
 			pub fn using<R, F: FnOnce() -> R>(
-				protected: &mut $t<$($args),*>,
+				protected: &mut dyn $t<$($args),*>,
 				f: F
 			) -> R {
 				let lifetime_extended = unsafe {
-					$crate::imp::transmute::<&mut $t<$($args),*>, &mut ($t<$($args),*> + 'static)>(protected)
+					$crate::transmute::<&mut dyn $t<$($args),*>, &mut (dyn $t<$($args),*> + 'static)>(protected)
 				};
 				$crate::using(&GLOBAL, lifetime_extended, f)
 			}
 
-			pub fn with<R, F: for<'a> FnOnce(&'a mut ($t<$($args),*> + 'a)) -> R>(
+			pub fn with<R, F: for<'a> FnOnce(&'a mut (dyn $t<$($args),*> + 'a)) -> R>(
 				f: F
 			) -> Option<R> {
 				$crate::with(&GLOBAL, |x| f(x))
@@ -219,24 +261,26 @@ macro_rules! environmental {
 	};
 	($name:ident<$traittype:ident> : trait $t:ident <$concretetype:ty>) => {
 		#[allow(non_camel_case_types, dead_code)]
-		struct $name <H: $traittype> { _private_field: $crate::imp::PhantomData<H> }
+		struct $name <H: $traittype> { _private_field: $crate::PhantomData<H> }
 
-		$crate::thread_local_impl!(static GLOBAL: $crate::imp::RefCell<Option<*mut ($t<$concretetype> + 'static)>>
-			= $crate::imp::RefCell::new(None));
+		$crate::thread_local_impl! {
+			static GLOBAL: $crate::GlobalInner<(dyn $t<$concretetype> + 'static)>
+				= Default::default()
+		};
 
 		impl<H: $traittype> $name<H> {
 			#[allow(unused_imports)]
 			pub fn using<R, F: FnOnce() -> R>(
-				protected: &mut $t<H>,
+				protected: &mut dyn $t<H>,
 				f: F
 			) -> R {
 				let lifetime_extended = unsafe {
-					$crate::imp::transmute::<&mut $t<H>, &mut ($t<$concretetype> + 'static)>(protected)
+					$crate::transmute::<&mut dyn $t<H>, &mut (dyn $t<$concretetype> + 'static)>(protected)
 				};
 				$crate::using(&GLOBAL, lifetime_extended, f)
 			}
 
-			pub fn with<R, F: for<'a> FnOnce(&'a mut ($t<$concretetype> + 'a)) -> R>(
+			pub fn with<R, F: for<'a> FnOnce(&'a mut (dyn $t<$concretetype> + 'a)) -> R>(
 				f: F
 			) -> Option<R> {
 				$crate::with(&GLOBAL, |x| f(x))
@@ -252,7 +296,6 @@ macro_rules! environmental {
 
 #[cfg(test)]
 mod tests {
-
 	#[test]
 	fn simple_works() {
 		environmental!(counter: u32);
@@ -294,7 +337,7 @@ mod tests {
 			fn set(&mut self, x: i32) { *self = x }
 		}
 
-		environmental!(foo: Foo + 'static);
+		environmental!(foo: dyn Foo + 'static);
 
 		fn stuff() {
 			foo::with(|value| {
@@ -341,7 +384,7 @@ mod tests {
 	#[test]
 	fn use_non_static_trait() {
 		trait Sum { fn sum(&self) -> usize; }
-		impl<'a> Sum for &'a [usize] {
+		impl Sum for &[usize] {
 			fn sum(&self) -> usize {
 				self.iter().fold(0, |a, c| a + c)
 			}
@@ -355,6 +398,33 @@ mod tests {
 		}).unwrap();
 
 		assert_eq!(got_sum, 15);
+	}
+
+	#[test]
+	fn stacking_globals() {
+		trait Sum { fn sum(&self) -> usize; }
+		impl Sum for &[usize] {
+			fn sum(&self) -> usize {
+				self.iter().fold(0, |a, c| a + c)
+			}
+		}
+
+		environmental!(sum: trait Sum);
+		let numbers = vec![1, 2, 3, 4, 5];
+		let mut numbers = &numbers[..];
+		let got_sum = sum::using(&mut numbers, || {
+			sum::with(|_| {
+				let numbers2 = vec![1, 2, 3, 4, 5, 6];
+				let mut numbers2 = &numbers2[..];
+				sum::using(&mut numbers2, || {
+					sum::with(|x| x.sum())
+				})
+			})
+		}).unwrap().unwrap();
+
+		assert_eq!(got_sum, 21);
+
+		assert!(sum::with(|_| ()).is_none());
 	}
 
 	#[test]
