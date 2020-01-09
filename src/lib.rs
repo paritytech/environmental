@@ -237,7 +237,7 @@ macro_rules! environmental {
 		$crate::thread_local_impl! {
 			static GLOBAL: $crate::GlobalInner<(dyn $t<$($args),*> + 'static)>
 				= Default::default()
-		};
+		}
 
 		impl $name {
 		#[allow(unused_imports)]
@@ -266,7 +266,7 @@ macro_rules! environmental {
 		$crate::thread_local_impl! {
 			static GLOBAL: $crate::GlobalInner<(dyn $t<$concretetype> + 'static)>
 				= Default::default()
-		};
+		}
 
 		impl<H: $traittype> $name<H> {
 			#[allow(unused_imports)]
@@ -296,6 +296,20 @@ macro_rules! environmental {
 
 #[cfg(test)]
 mod tests {
+	// Test trait in item position
+	#[allow(dead_code)]
+	mod trait_test {
+		trait Test {}
+
+		environmental!(item_positon_trait: trait Test);
+	}
+
+	// Test type in item position
+	#[allow(dead_code)]
+	mod type_test {
+		environmental!(item_position_type: u32);
+	}
+
 	#[test]
 	fn simple_works() {
 		environmental!(counter: u32);
