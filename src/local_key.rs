@@ -27,13 +27,6 @@ pub struct LocalKey<T: 'static> {
 unsafe impl<T: 'static> ::core::marker::Sync for LocalKey<T> {}
 
 impl<T: 'static> LocalKey<T> {
-	pub const fn new(init: fn() -> T) -> LocalKey<T> {
-		LocalKey {
-			init,
-			inner: RefCell::new(None),
-		}
-	}
-
 	pub fn with<F, R>(&'static self, f: F) -> R
 	where F: FnOnce(&T) -> R
 	{
@@ -45,5 +38,18 @@ impl<T: 'static> LocalKey<T> {
 		// 1. `inner` can be borrowed mutably only once at the initialization time.
 		// 2. After the initialization `inner` is always `Some`.
 		f(&*self.inner.borrow().as_ref().unwrap())
+	}
+}
+
+/// Initialize [`LocalKey`].
+#[macro_export]
+macro_rules! local_key_init {
+	(
+		$init:ident
+	) => {
+		$crate::LocalKey {
+			init: $init,
+			inner: $crate::RefCell::new(None),
+		}
 	}
 }

@@ -50,6 +50,7 @@ pub use core::{cell::RefCell, mem::{transmute, replace}, marker::PhantomData};
 pub use alloc::{rc::Rc, vec::Vec};
 
 #[cfg(not(feature = "std"))]
+#[macro_export]
 mod local_key;
 
 #[doc(hidden)]
@@ -78,7 +79,7 @@ macro_rules! thread_local_impl {
 		static $name: $crate::LocalKey<$t> = {
 			fn __init() -> $t { $init }
 
-			$crate::LocalKey::new(__init)
+			$crate::local_key_init!(__init)
 		};
 	);
 }
