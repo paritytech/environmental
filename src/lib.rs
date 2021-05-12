@@ -39,7 +39,6 @@
 //! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
-#![cfg_attr(not(feature = "std"), feature(const_fn))]
 
 extern crate alloc;
 
@@ -315,7 +314,7 @@ mod tests {
 	fn simple_works() {
 		environmental!(counter: u32);
 
-		fn stuff() { counter::with(|value| *value += 1); };
+		fn stuff() { counter::with(|value| *value += 1); }
 
 		// declare a stack variable of the same type as our global declaration.
 		let mut local = 41u32;
