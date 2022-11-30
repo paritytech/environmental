@@ -1,4 +1,4 @@
-// Copyright 2017-2020 Parity Technologies
+// Copyright 2017-2022 Parity Technologies
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -90,6 +90,16 @@ pub type GlobalInner<T> = RefCell<Vec<Rc<RefCell<*mut T>>>>;
 /// The global type.
 type Global<T> = LocalKey<GlobalInner<T>>;
 
+struct PopGlobal<'a, T: 'a + ?Sized> {
+	global_stack: &'a GlobalInner<T>,
+}
+
+impl<'a, T: 'a + ?Sized> Drop for PopGlobal<'a, T> {
+	fn drop(&mut self) {
+		self.global_stack.borrow_mut().pop();
+	}
+}
+
 #[doc(hidden)]
 pub fn using<T: ?Sized, R, F: FnOnce() -> R>(
 	global: &'static Global<T>,
@@ -99,10 +109,9 @@ pub fn using<T: ?Sized, R, F: FnOnce() -> R>(
 	// store the `protected` reference as a pointer so we can provide it to logic running within
 	// `f`.
 	// while we record this pointer (while it's non-zero) we guarantee:
-	// - it will only be used once at any time (no reentrancy);
+	// - it will only be used once at any time (no re-entrancy);
 	// - that no other thread will use it; and
-	// - that we do not use the original mutating reference while the pointer.
-	// exists.
+	// - that we do not use the original mutating reference while the pointer exists.
 	global.with(|r| {
 		// Push the new global to the end of the stack.
 		r.borrow_mut().push(
@@ -110,19 +119,39 @@ pub fn using<T: ?Sized, R, F: FnOnce() -> R>(
 		);
 
 		// Even if `f` panics the added global will be popped.
-		struct PopGlobal<'a, T: 'a + ?Sized> {
-			global_stack: &'a GlobalInner<T>,
-		}
-
-		impl<'a, T: 'a + ?Sized> Drop for PopGlobal<'a, T> {
-			fn drop(&mut self) {
-				self.global_stack.borrow_mut().pop();
-			}
-		}
-
 		let _guard = PopGlobal { global_stack: r };
 
 		f()
+	})
+}
+
+#[doc(hidden)]
+pub fn using_once<T: ?Sized, R, F: FnOnce() -> R>(
+	global: &'static Global<T>,
+	protected: &mut T,
+	f: F,
+) -> R {
+	// store the `protected` reference as a pointer so we can provide it to logic running within
+	// `f`.
+	// while we record this pointer (while it's non-zero) we guarantee:
+	// - it will only be used once at any time (no re-entrancy);
+	// - that no other thread will use it; and
+	// - that we do not use the original mutating reference while the pointer exists.
+	global.with(|r| {
+		// If there is already some state set, we want to use it.
+		if r.borrow().last().is_some() {
+			f()
+		} else {
+			// Push the new global to the end of the stack.
+			r.borrow_mut().push(
+				Rc::new(RefCell::new(protected as _)),
+			);
+
+			// Even if `f` panics the added global will be popped.
+			let _guard = PopGlobal { global_stack: r };
+
+			f()
+		}
 	})
 }
 
@@ -152,11 +181,16 @@ pub fn with<T: ?Sized, R, F: FnOnce(&mut T) -> R>(
 ///
 /// * `pub fn using<R, F: FnOnce() -> R>(protected: &mut $t, f: F) -> R`
 ///   This executes `f`, returning its value. During the call, the module's reference is set to
-///   be equal to `protected`.
+///   be equal to `protected`. When nesting `using` calls it will build a stack of the set values.
+///   Each call to `with` will always return the latest value in this stack.
 /// * `pub fn with<R, F: FnOnce(&mut $t) -> R>(f: F) -> Option<R>`
 ///   This executes `f`, returning `Some` of its value if called from code that is being executed
 ///   as part of a `using` call. If not, it returns `None`. `f` is provided with one argument: the
 ///   same reference as provided to the most recent `using` call.
+/// * `pub fn using_once<R, F: FnOnce() -> R>(protected: &mut $t, f: F) -> R`
+///   This executes `f`, returning its value. During the call, the module's reference is set to
+///   be equal to `protected` when there is not already a value set. In contrast to `using` this
+///   will not build a stack of set values and it will use the already set value.
 ///
 /// # Examples
 ///
@@ -215,18 +249,27 @@ macro_rules! environmental {
 
 		impl $name {
 			#[allow(unused_imports)]
-
+			#[allow(dead_code)]
 			pub fn using<R, F: FnOnce() -> R>(
 				protected: &mut $t,
-				f: F
+				f: F,
 			) -> R {
 				$crate::using(&GLOBAL, protected, f)
 			}
 
+			#[allow(dead_code)]
 			pub fn with<R, F: FnOnce(&mut $t) -> R>(
-				f: F
+				f: F,
 			) -> Option<R> {
 				$crate::with(&GLOBAL, |x| f(x))
+			}
+
+			#[allow(dead_code)]
+			pub fn using_once<R, F: FnOnce() -> R>(
+				protected: &mut $t,
+				f: F,
+			) -> R {
+				$crate::using_once(&GLOBAL, protected, f)
 			}
 		}
 	};
@@ -240,8 +283,8 @@ macro_rules! environmental {
 		}
 
 		impl $name {
-		#[allow(unused_imports)]
-
+			#[allow(unused_imports)]
+			#[allow(dead_code)]
 			pub fn using<R, F: FnOnce() -> R>(
 				protected: &mut dyn $t<$($args),*>,
 				f: F
@@ -252,10 +295,23 @@ macro_rules! environmental {
 				$crate::using(&GLOBAL, lifetime_extended, f)
 			}
 
+			#[allow(dead_code)]
 			pub fn with<R, F: for<'a> FnOnce(&'a mut (dyn $t<$($args),*> + 'a)) -> R>(
 				f: F
 			) -> Option<R> {
 				$crate::with(&GLOBAL, |x| f(x))
+			}
+
+			#[allow(unused_imports)]
+			#[allow(dead_code)]
+			pub fn using_once<R, F: FnOnce() -> R>(
+				protected: &mut dyn $t<$($args),*>,
+				f: F
+			) -> R {
+				let lifetime_extended = unsafe {
+					$crate::transmute::<&mut dyn $t<$($args),*>, &mut (dyn $t<$($args),*> + 'static)>(protected)
+				};
+				$crate::using_once(&GLOBAL, lifetime_extended, f)
 			}
 		}
 	};
@@ -270,6 +326,7 @@ macro_rules! environmental {
 
 		impl<H: $traittype> $name<H> {
 			#[allow(unused_imports)]
+			#[allow(dead_code)]
 			pub fn using<R, F: FnOnce() -> R>(
 				protected: &mut dyn $t<H>,
 				f: F
@@ -280,10 +337,23 @@ macro_rules! environmental {
 				$crate::using(&GLOBAL, lifetime_extended, f)
 			}
 
+			#[allow(dead_code)]
 			pub fn with<R, F: for<'a> FnOnce(&'a mut (dyn $t<$concretetype> + 'a)) -> R>(
 				f: F
 			) -> Option<R> {
 				$crate::with(&GLOBAL, |x| f(x))
+			}
+
+			#[allow(unused_imports)]
+			#[allow(dead_code)]
+			pub fn using_once<R, F: FnOnce() -> R>(
+				protected: &mut dyn $t<H>,
+				f: F
+			) -> R {
+				let lifetime_extended = unsafe {
+					$crate::transmute::<&mut dyn $t<H>, &mut (dyn $t<$concretetype> + 'static)>(protected)
+				};
+				$crate::using_once(&GLOBAL, lifetime_extended, f)
 			}
 		}
 	};
@@ -463,5 +533,30 @@ mod tests {
 
 		assert_eq!(out, 6 + 42);
 		environmental!(foo<Plus>: trait Multiplier<ConcretePlus>);
+	}
+
+	#[test]
+	fn using_once_is_working() {
+		environmental!(value: u32);
+
+		let mut called_inner = false;
+
+		value::using_once(&mut 5, || {
+			value::using_once(&mut 10, || {
+				assert_eq!(5, value::with(|v| *v).unwrap());
+
+				value::using(&mut 20, || {
+					assert_eq!(20, value::with(|v| *v).unwrap());
+
+					value::using_once(&mut 30, || {
+						assert_eq!(20, value::with(|v| *v).unwrap());
+
+						called_inner = true;
+					})
+				})
+			})
+		});
+
+		assert!(called_inner);
 	}
 }
